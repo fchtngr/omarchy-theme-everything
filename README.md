@@ -37,7 +37,6 @@ Each integration lives in its own self-contained folder under `integrations/`.
 
 See:
 - `integrations/intellij/README.md`
-- `intellij-plugin/README.md`
 - `integrations/k9s/README.md`
 
 ## Notes
