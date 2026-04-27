@@ -2,8 +2,7 @@
 
 This is the in-repo IntelliJ / JetBrains integration.
 
-![Osake Jade](screen1.png)
-![Nord](screen2.png)
+![Demo](demo.gif)
 
 ## Overview
 
