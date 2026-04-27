@@ -2,6 +2,9 @@
 
 Extra Omarchy theme integrations for third-party apps.
 
+Motivation: make Omarchy themes work in non-standard applications too.
+[Related discussion](https://github.com/basecamp/omarchy/pull/5416#issuecomment-4322495081)
+
 ![Theme all the things](theme-all-the-things.jpg)
 
 Current integrations:
