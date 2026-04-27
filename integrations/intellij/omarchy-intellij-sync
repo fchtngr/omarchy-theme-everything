@@ -1,0 +1,690 @@
+#!/usr/bin/env python3
+import argparse
+import colorsys
+import json
+from pathlib import Path
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    print('Python 3.11+ is required (missing tomllib)', file=sys.stderr)
+    sys.exit(1)
+
+DEFAULT_THEME_DIR = Path.home() / '.config/omarchy/current/theme'
+DEFAULT_NAME = 'Omarchy'
+PLUGIN_ID = 'omarchy.intellij.theme'
+PLUGIN_DIR_NAME = 'omarchy-intellij-theme'
+PLUGIN_JAR_NAME = 'omarchy-intellij-theme.jar'
+THEME_FILE_NAME = 'omarchy.theme.json'
+SCHEME_FILE_NAME = 'omarchy.xml'
+LEGACY_SCHEME_FILE_NAME = 'omarchy.icls'
+LEGACY_THEME_FILE_NAME = 'omarchy.theme.json'
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.strip().lstrip('#')
+    if len(value) != 6:
+        raise ValueError(f'Expected #RRGGBB, got {value!r}')
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return '#' + ''.join(f'{max(0, min(255, c)):02x}' for c in rgb)
+
+
+def xml_hex(value: str) -> str:
+    return value.lstrip('#').upper()
+
+
+def mix(a: str, b: str, ratio: float) -> str:
+    ar, ag, ab = hex_to_rgb(a)
+    br, bg, bb = hex_to_rgb(b)
+    rgb = (
+        round(ar + (br - ar) * ratio),
+        round(ag + (bg - ag) * ratio),
+        round(ab + (bb - ab) * ratio),
+    )
+    return rgb_to_hex(rgb)
+
+
+def shift_lightness(color: str, amount: float) -> str:
+    r, g, b = [c / 255 for c in hex_to_rgb(color)]
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0.0, min(1.0, l + amount))
+    rgb = colorsys.hls_to_rgb(h, l, s)
+    return rgb_to_hex(tuple(round(c * 255) for c in rgb))
+
+
+def luminance(color: str) -> float:
+    r, g, b = [c / 255 for c in hex_to_rgb(color)]
+
+    def channel(v: float) -> float:
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    r, g, b = channel(r), channel(g), channel(b)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def is_dark(color: str) -> bool:
+    return luminance(color) < 0.4
+
+
+def discover_ide_pairs() -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    roots = [
+        (Path.home() / '.config/JetBrains', Path.home() / '.local/share/JetBrains', lambda n: True),
+        (Path.home() / '.config/Google', Path.home() / '.local/share/Google', lambda n: n.startswith('AndroidStudio')),
+    ]
+    for config_root, data_root, matcher in roots:
+        if not config_root.exists() or not data_root.exists():
+            continue
+        for config_dir in sorted(config_root.iterdir()):
+            if not config_dir.is_dir() or not matcher(config_dir.name):
+                continue
+            data_dir = data_root / config_dir.name
+            if data_dir.is_dir():
+                pairs.append((config_dir, data_dir))
+    return pairs
+
+
+def sanitize_name(value: str) -> str:
+    return re.sub(r'\s+', ' ', value).strip() or DEFAULT_NAME
+
+
+def load_palette(colors_file: Path) -> dict[str, str]:
+    with colors_file.open('rb') as f:
+        data = tomllib.load(f)
+    palette = {k: v for k, v in data.items() if isinstance(v, str) and v.startswith('#')}
+    required = ['background', 'foreground', 'accent', 'cursor', 'selection_background', 'selection_foreground']
+    missing = [key for key in required if key not in palette]
+    if missing:
+        raise SystemExit(f'Missing required colors in {colors_file}: {", ".join(missing)}')
+    return palette
+
+
+def build_theme_json(name: str, palette: dict[str, str]) -> dict:
+    bg = palette['background']
+    fg = palette['foreground']
+    accent = palette['accent']
+    cursor = palette['cursor']
+    sel_bg = palette['selection_background']
+    sel_fg = palette['selection_foreground']
+
+    dark = is_dark(bg)
+    surface0 = shift_lightness(bg, 0.03 if dark else -0.03)
+    surface1 = shift_lightness(bg, 0.06 if dark else -0.06)
+    border = mix(bg, fg, 0.18)
+    border_subtle = mix(bg, fg, 0.28)
+    disabled = mix(fg, bg, 0.45)
+    button = mix(bg, accent, 0.20)
+    button_hover = mix(bg, accent, 0.30)
+    inactive_selection = mix(sel_bg, bg, 0.45)
+
+    colors = {
+        'background': bg,
+        'backgroundElevated': surface0,
+        'backgroundSelected': sel_bg,
+        'backgroundHover': surface1,
+        'backgroundFrame': surface0,
+        'foreground': fg,
+        'foregroundBright': shift_lightness(fg, 0.08 if dark else -0.08),
+        'foregroundDim': disabled,
+        'accent': accent,
+        'accentSecondary': palette.get('color4', accent),
+        'border': border,
+        'borderSubtle': border_subtle,
+        'selection': sel_bg,
+        'selectionInactive': inactive_selection,
+        'red': palette.get('color1', accent),
+        'orange': palette.get('color9', palette.get('color3', accent)),
+        'yellow': palette.get('color3', accent),
+        'green': palette.get('color2', accent),
+        'blue': palette.get('color4', accent),
+        'purple': palette.get('color5', accent),
+        'teal': palette.get('color6', accent),
+        'caret': cursor,
+        'selectionForeground': sel_fg,
+    }
+
+    return {
+        'name': name,
+        'dark': dark,
+        'author': 'Generated from Omarchy colors',
+        'parentTheme': 'ExperimentalDark' if dark else 'ExperimentalLight',
+        'editorScheme': f'/theme/{SCHEME_FILE_NAME}',
+        'colors': colors,
+        'ui': {
+            'Islands': 1,
+            'Island.arc': 20,
+            'Island.arc.compact': 16,
+            'Island.borderColor': 'border',
+            'Island.borderWidth': 4,
+            'Island.borderWidth.compact': 3,
+            'Island.inactiveAlpha': 0.55,
+            '*': {
+                'background': 'background',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'selectionInactiveBackground': 'selectionInactive',
+                'inactiveBackground': 'background',
+                'disabledBackground': 'background',
+                'disabledForeground': 'foregroundDim',
+                'disabledText': 'foregroundDim',
+                'borderColor': 'border',
+                'separatorColor': 'border',
+                'focusColor': 'accent',
+                'focusedBorderColor': 'accent',
+                'selectedForeground': 'selectionForeground',
+                'selectedBackground': 'selection',
+                'hoverBackground': 'backgroundHover',
+                'pressedBackground': 'backgroundSelected',
+                'acceleratorForeground': 'foregroundDim',
+                'errorForeground': 'red',
+                'warningForeground': 'orange',
+                'infoForeground': 'accent',
+            },
+            'MainWindow': {
+                'background': 'backgroundFrame',
+                'Border.color': 'border',
+            },
+            'Window': {
+                'background': 'backgroundFrame',
+            },
+            'MainToolbar': {
+                'background': 'backgroundFrame',
+                'borderColor': '#00000000',
+                'Dropdown.hoverBackground': 'backgroundHover',
+                'Dropdown.pressBackground': 'backgroundSelected',
+                'Icon.hoverBackground': 'backgroundHover',
+                'Icon.pressBackground': 'backgroundSelected',
+            },
+            'TitlePane': {
+                'background': 'backgroundFrame',
+                'inactiveBackground': 'backgroundFrame',
+                'foreground': 'foreground',
+                'inactiveForeground': 'foregroundDim',
+                'Button.hoverBackground': 'backgroundSelected',
+            },
+            'Panel': {
+                'background': 'background',
+                'foreground': 'foreground',
+            },
+            'Viewport': {
+                'background': 'background',
+            },
+            'ToolWindow': {
+                'background': 'background',
+                'Header.background': 'background',
+                'Header.inactiveBackground': 'background',
+                'Header.borderColor': 'border',
+                'HeaderTab.underlinedTabBackground': 'backgroundElevated',
+                'HeaderTab.selectedInactiveBackground': 'backgroundElevated',
+                'HeaderTab.hoverBackground': 'backgroundHover',
+                'HeaderTab.hoverInactiveBackground': 'backgroundHover',
+                'HeaderTab.underlineColor': 'accent',
+                'HeaderTab.underlineHeight': 3,
+                'Button.hoverBackground': 'backgroundSelected',
+                'Button.selectedBackground': 'backgroundSelected',
+                'Button.selectedForeground': 'foregroundBright',
+                'Stripe.background': 'backgroundFrame',
+                'Stripe.borderColor': '#00000000',
+                'Stripe.Icon.foreground': 'foreground',
+                'Stripe.Icon.selectedForeground': 'foregroundBright',
+                'Stripe.Icon.disabledForeground': 'foregroundDim',
+            },
+            'Tree': {
+                'background': 'background',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'selectionInactiveBackground': 'selectionInactive',
+                'hoverBackground': 'backgroundHover',
+                'modifiedItemForeground': 'accent',
+                'rowHeight': 24,
+                'hash': 'borderSubtle',
+                'indentLineColor': 'borderSubtle',
+            },
+            'List': {
+                'background': 'background',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'selectionInactiveBackground': 'selectionInactive',
+                'hoverBackground': 'backgroundHover',
+            },
+            'Table': {
+                'background': 'background',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'selectionInactiveBackground': 'selectionInactive',
+                'hoverBackground': 'backgroundHover',
+                'gridColor': 'border',
+                'stripeColor': 'backgroundElevated',
+            },
+            'EditorTabs': {
+                'background': 'background',
+                'underTabsBorderColor': 'border',
+                'underlineColor': 'accent',
+                'underlineHeight': 3,
+                'underlinedTabBackground': 'backgroundElevated',
+                'underlinedTabForeground': 'foreground',
+                'underlinedBorderColor': 'accent',
+                'inactiveUnderlinedTabBorderColor': 'foregroundDim',
+                'inactiveUnderlinedTabBackground': 'background',
+                'inactiveUnderlineColor': 'foregroundDim',
+                'hoverBackground': 'backgroundHover',
+                'inactiveColoredFileBackground': '#00000000',
+            },
+            'DefaultTabs': {
+                'background': 'background',
+                'underlineColor': 'accent',
+                'underlineHeight': 3,
+                'hoverBackground': 'backgroundHover',
+                'inactiveUnderlineColor': 'foregroundDim',
+            },
+            'Editor': {
+                'background': 'background',
+                'foreground': 'foreground',
+                'shortcutForeground': 'accent',
+                'SearchField.borderColor': 'border',
+            },
+            'EditorPane': {
+                'background': 'background',
+                'foreground': 'foreground',
+            },
+            'TextField': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'caretForeground': 'caret',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'borderColor': 'border',
+                'focusedBorderColor': 'accent',
+                'hoverBorderColor': 'borderSubtle',
+            },
+            'TextArea': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'caretForeground': 'caret',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+            },
+            'ComboBox': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'nonEditableBackground': 'backgroundElevated',
+                'ArrowButton.iconColor': 'foreground',
+                'ArrowButton.disabledIconColor': 'foregroundDim',
+                'ArrowButton.nonEditableBackground': 'backgroundElevated',
+                'borderColor': 'border',
+                'focusedBorderColor': 'accent',
+                'hoverBorderColor': 'borderSubtle',
+            },
+            'Button': {
+                'arc': 8,
+                'background': button,
+                'foreground': 'foreground',
+                'startBackground': button,
+                'endBackground': button,
+                'startBorderColor': 'borderSubtle',
+                'endBorderColor': 'borderSubtle',
+                'focusedBorderColor': 'accent',
+                'disabledBorderColor': 'border',
+                'shadowColor': '#00000000',
+                'shadowWidth': 0,
+                'default': {
+                    'background': 'accent',
+                    'foreground': 'selectionForeground',
+                    'startBackground': 'accent',
+                    'endBackground': 'accent',
+                    'startBorderColor': 'accent',
+                    'endBorderColor': 'accent',
+                    'focusedBorderColor': 'accent',
+                    'focusColor': accent + '66',
+                    'shadowColor': '#00000000',
+                },
+            },
+            'ActionButton': {
+                'hoverBackground': button_hover,
+                'hoverBorderColor': button_hover,
+                'pressedBackground': 'backgroundSelected',
+                'pressedBorderColor': 'backgroundSelected',
+                'borderColor': '#00000000',
+            },
+            'Popup': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'borderColor': 'borderSubtle',
+                'Header.activeBackground': 'backgroundSelected',
+                'Header.inactiveBackground': 'backgroundElevated',
+                'Advertiser.foreground': 'foregroundDim',
+                'Advertiser.background': 'backgroundElevated',
+                'separatorColor': 'border',
+                'paintBorder': True,
+            },
+            'PopupMenu': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'borderColor': 'borderSubtle',
+            },
+            'Menu': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'borderColor': 'borderSubtle',
+                'separatorColor': 'border',
+                'acceleratorForeground': 'foregroundDim',
+                'acceleratorSelectionForeground': 'selectionForeground',
+            },
+            'MenuItem': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'selectionBackground': 'selection',
+                'selectionForeground': 'selectionForeground',
+                'acceleratorForeground': 'foregroundDim',
+                'disabledForeground': 'foregroundDim',
+            },
+            'StatusBar': {
+                'background': 'backgroundFrame',
+                'foreground': 'foreground',
+                'borderColor': '#00000000',
+                'Widget.hoverBackground': 'backgroundSelected',
+            },
+            'Notification': {
+                'background': 'backgroundElevated',
+                'foreground': 'foreground',
+                'borderColor': 'borderSubtle',
+            },
+            'ProgressBar': {
+                'trackColor': 'backgroundElevated',
+                'progressColor': 'accent',
+                'indeterminateStartColor': 'accent',
+                'indeterminateEndColor': 'accentSecondary',
+                'failedColor': 'red',
+                'failedEndColor': 'red',
+                'passedColor': 'green',
+                'passedEndColor': 'green',
+            },
+            'ScrollBar': {
+                'thumbColor': mix(surface1, fg, 0.12),
+                'thumbBorderColor': mix(surface1, fg, 0.12),
+                'hoverThumbColor': mix(surface1, fg, 0.22),
+                'hoverThumbBorderColor': mix(surface1, fg, 0.22),
+                'trackColor': bg,
+            },
+            'Link': {
+                'activeForeground': 'accent',
+                'hoverForeground': shift_lightness(accent, 0.08 if dark else -0.08),
+                'pressedForeground': 'accent',
+            },
+            'WelcomeScreen': {
+                'background': 'background',
+            },
+        },
+        'icons': {
+            'ColorPalette': {
+                'Actions.Blue': palette.get('color4', accent),
+                'Actions.Green': palette.get('color2', accent),
+                'Actions.Yellow': palette.get('color3', accent),
+                'Actions.Red': palette.get('color1', accent),
+                'Checkbox.Background.Default': surface0,
+                'Checkbox.Border.Default': border,
+                'Checkbox.Focus.Thin.Default': accent,
+                'Objects.Grey': disabled,
+            }
+        },
+    }
+
+
+def build_editor_scheme_xml(name: str, palette: dict[str, str]) -> str:
+    bg = palette['background']
+    fg = palette['foreground']
+    accent = palette['accent']
+    cursor = palette['cursor']
+    sel_bg = palette['selection_background']
+    sel_fg = palette['selection_foreground']
+    line = shift_lightness(bg, 0.05 if is_dark(bg) else -0.05)
+    gutter = shift_lightness(bg, 0.03 if is_dark(bg) else -0.03)
+    ident = mix(accent, bg, 0.65)
+
+    def opt(name: str, value: str) -> str:
+        return f'    <option name="{name}" value="{xml_hex(value)}" />'
+
+    def attr(name: str, *, fg_value: str | None = None, bg_value: str | None = None, effect: str | None = None, effect_type: str | None = None, font_type: str | None = None) -> str:
+        parts = [f'    <option name="{name}">', '      <value>']
+        if fg_value:
+            parts.append(f'        <option name="FOREGROUND" value="{xml_hex(fg_value)}" />')
+        if bg_value:
+            parts.append(f'        <option name="BACKGROUND" value="{xml_hex(bg_value)}" />')
+        if effect:
+            parts.append(f'        <option name="EFFECT_COLOR" value="{xml_hex(effect)}" />')
+        if effect_type:
+            parts.append(f'        <option name="EFFECT_TYPE" value="{effect_type}" />')
+        if font_type:
+            parts.append(f'        <option name="FONT_TYPE" value="{font_type}" />')
+        parts += ['      </value>', '    </option>']
+        return '\n'.join(parts)
+
+    lines = [
+        f'<scheme name="{name}" version="142" parent_scheme="Darcula">',
+        '  <colors>',
+        opt('CARET_COLOR', cursor),
+        opt('CARET_ROW_COLOR', line),
+        opt('CONSOLE_BACKGROUND_KEY', bg),
+        opt('GUTTER_BACKGROUND', gutter),
+        opt('INDENT_GUIDE', mix(fg, bg, 0.75)),
+        opt('LINE_NUMBERS_COLOR', mix(fg, bg, 0.50)),
+        opt('RIGHT_MARGIN_COLOR', mix(fg, bg, 0.80)),
+        opt('SELECTION_BACKGROUND', sel_bg),
+        opt('SELECTION_FOREGROUND', sel_fg),
+        opt('TEARLINE_COLOR', mix(fg, bg, 0.78)),
+        opt('WHITESPACES', mix(fg, bg, 0.72)),
+        '  </colors>',
+        '  <attributes>',
+        attr('DEFAULT_TEXT', fg_value=fg, bg_value=bg),
+        attr('TEXT', fg_value=fg, bg_value=bg),
+        attr('CARET_ROW', bg_value=line),
+        attr('IDENTIFIER_UNDER_CARET_ATTRIBUTES', bg_value=ident),
+        attr('TEXT_SEARCH_RESULT_ATTRIBUTES', bg_value=mix(accent, bg, 0.30), effect=accent, effect_type='BOXED'),
+        attr('LIVE_TEMPLATE_ATTRIBUTES', effect=accent, effect_type='ROUNDED_BOX'),
+        attr('MATCHED_BRACE_ATTRIBUTES', bg_value=mix(accent, bg, 0.30), effect=accent, effect_type='BOXED'),
+        attr('WRITE_SEARCH_RESULT_ATTRIBUTES', bg_value=mix(palette.get('color1', accent), bg, 0.35), effect=palette.get('color1', accent), effect_type='BOXED'),
+        '  </attributes>',
+        '</scheme>',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+def build_plugin_xml(name: str) -> str:
+    return f'''<idea-plugin>
+  <id>{PLUGIN_ID}</id>
+  <name>{name}</name>
+  <vendor email="" url="https://omarchy.org">Omarchy</vendor>
+  <category>UI</category>
+  <version>1.0.0</version>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <themeProvider id="{PLUGIN_ID}" path="/theme/{THEME_FILE_NAME}" />
+  </extensions>
+</idea-plugin>
+'''
+
+
+def plugin_layout(output_dir: Path) -> tuple[Path, Path]:
+    plugin_root = output_dir / PLUGIN_DIR_NAME
+    jar_path = plugin_root / 'lib' / PLUGIN_JAR_NAME
+    return plugin_root, jar_path
+
+
+def write_plugin(output_dir: Path, name: str, theme_json: dict, editor_xml: str) -> tuple[Path, Path]:
+    plugin_root, jar_path = plugin_layout(output_dir)
+    jar_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(jar_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('META-INF/plugin.xml', build_plugin_xml(name))
+        zf.writestr(f'theme/{THEME_FILE_NAME}', json.dumps(theme_json, indent=2) + '\n')
+        zf.writestr(f'theme/{SCHEME_FILE_NAME}', editor_xml)
+    return plugin_root, jar_path
+
+
+def remove_legacy_files(config_dir: Path) -> None:
+    for path in [
+        config_dir / 'themes' / LEGACY_THEME_FILE_NAME,
+        config_dir / 'themes' / f'{DEFAULT_NAME}.theme.json',
+        config_dir / 'colors' / LEGACY_SCHEME_FILE_NAME,
+        config_dir / 'colors' / f'{DEFAULT_NAME}.icls',
+        config_dir / 'colors' / 'Omarchy Sync.icls',
+        config_dir / 'themes' / 'Omarchy Sync.theme.json',
+    ]:
+        if path.exists():
+            path.unlink()
+
+
+def ensure_options_component_file(path: Path, component_name: str) -> ET.ElementTree:
+    if path.exists():
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+            if root.tag == 'application':
+                return tree
+        except ET.ParseError:
+            pass
+    root = ET.Element('application')
+    ET.SubElement(root, 'component', {'name': component_name})
+    return ET.ElementTree(root)
+
+
+def get_or_create_component(root: ET.Element, name: str) -> ET.Element:
+    for component in root.findall('component'):
+        if component.get('name') == name:
+            return component
+    return ET.SubElement(root, 'component', {'name': name})
+
+
+def indent_xml(elem: ET.Element, level: int = 0) -> None:
+    i = '\n' + level * '  '
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + '  '
+        for child in elem:
+            indent_xml(child, level + 1)
+        if not elem[-1].tail or not elem[-1].tail.strip():
+            elem[-1].tail = i
+    if level and (not elem.tail or not elem.tail.strip()):
+        elem.tail = i
+
+
+def write_xml(tree: ET.ElementTree, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    indent_xml(tree.getroot())
+    tree.write(path, encoding='UTF-8', xml_declaration=False)
+
+
+def select_theme_and_scheme(config_dir: Path, theme_name: str) -> None:
+    options_dir = config_dir / 'options'
+    options_dir.mkdir(parents=True, exist_ok=True)
+
+    laf_path = options_dir / 'laf.xml'
+    laf_tree = ensure_options_component_file(laf_path, 'LafManager')
+    laf_root = laf_tree.getroot()
+    laf_component = get_or_create_component(laf_root, 'LafManager')
+    laf = laf_component.find('laf')
+    if laf is None:
+        laf = ET.SubElement(laf_component, 'laf')
+    laf.attrib.clear()
+    laf.set('themeId', PLUGIN_ID)
+    write_xml(laf_tree, laf_path)
+
+    scheme_path = options_dir / 'colors.scheme.xml'
+    scheme_tree = ensure_options_component_file(scheme_path, 'EditorColorsManagerImpl')
+    scheme_root = scheme_tree.getroot()
+    scheme_component = get_or_create_component(scheme_root, 'EditorColorsManagerImpl')
+    global_scheme = scheme_component.find('global_color_scheme')
+    if global_scheme is None:
+        global_scheme = ET.SubElement(scheme_component, 'global_color_scheme')
+    global_scheme.attrib.clear()
+    global_scheme.set('name', theme_name)
+    write_xml(scheme_tree, scheme_path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Generate and install an IntelliJ theme plugin from Omarchy colors')
+    parser.add_argument('--theme-dir', type=Path, default=DEFAULT_THEME_DIR, help='Omarchy theme directory containing colors.toml')
+    parser.add_argument('--colors-file', type=Path, help='Path to colors.toml')
+    parser.add_argument('--jb-config-dir', action='append', type=Path, dest='jb_config_dirs', help='JetBrains config dir to update settings in (repeatable)')
+    parser.add_argument('--jb-data-dir', action='append', type=Path, dest='jb_data_dirs', help='JetBrains data dir to install plugin into (repeatable)')
+    parser.add_argument('--output-dir', type=Path, help='Generate plugin files into a directory without installing')
+    parser.add_argument('--name', default=DEFAULT_NAME, help='Visible IntelliJ theme/scheme name')
+    parser.add_argument('--no-select', action='store_true', help='Install plugin but do not switch IntelliJ to it')
+    args = parser.parse_args()
+
+    colors_file = args.colors_file or (args.theme_dir / 'colors.toml')
+    if not colors_file.exists():
+        print(f'colors.toml not found: {colors_file}', file=sys.stderr)
+        return 1
+
+    name = sanitize_name(args.name)
+    palette = load_palette(colors_file)
+    theme_json = build_theme_json(name, palette)
+    editor_xml = build_editor_scheme_xml(name, palette)
+
+    if args.output_dir:
+        plugin_root, jar_path = write_plugin(args.output_dir, name, theme_json, editor_xml)
+        print(f'Wrote plugin dir {plugin_root}')
+        print(f'Wrote plugin jar {jar_path}')
+        return 0
+
+    if args.jb_config_dirs or args.jb_data_dirs:
+        config_dirs = args.jb_config_dirs or []
+        data_dirs = args.jb_data_dirs or []
+        if config_dirs and data_dirs and len(config_dirs) != len(data_dirs):
+            print('--jb-config-dir and --jb-data-dir must be provided the same number of times when both are used.', file=sys.stderr)
+            return 1
+        if config_dirs and not data_dirs:
+            pairs = []
+            for config_dir in config_dirs:
+                if config_dir.parent.name == 'JetBrains' and config_dir.parent.parent == Path.home() / '.config':
+                    data_dir = Path.home() / '.local/share/JetBrains' / config_dir.name
+                elif config_dir.parent.name == 'Google' and config_dir.parent.parent == Path.home() / '.config':
+                    data_dir = Path.home() / '.local/share/Google' / config_dir.name
+                else:
+                    print(f'Cannot infer data dir from config dir: {config_dir}. Also pass --jb-data-dir.', file=sys.stderr)
+                    return 1
+                pairs.append((config_dir, data_dir))
+        elif data_dirs and not config_dirs:
+            pairs = [(Path(), data_dir) for data_dir in data_dirs]
+        else:
+            pairs = list(zip(config_dirs, data_dirs))
+    else:
+        pairs = discover_ide_pairs()
+
+    if not pairs:
+        print('No JetBrains installations found. Use --output-dir or explicit --jb-config-dir/--jb-data-dir.', file=sys.stderr)
+        return 1
+
+    for config_dir, data_dir in pairs:
+        plugin_root, jar_path = write_plugin(data_dir, name, theme_json, editor_xml)
+        print(f'Installed plugin dir {plugin_root}')
+        print(f'Installed plugin jar {jar_path}')
+        if config_dir and config_dir.exists():
+            remove_legacy_files(config_dir)
+            if not args.no_select:
+                select_theme_and_scheme(config_dir, name)
+                print(f'Selected theme in {config_dir / "options/laf.xml"}')
+                print(f'Selected scheme in {config_dir / "options/colors.scheme.xml"}')
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

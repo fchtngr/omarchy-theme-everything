@@ -1,0 +1,3 @@
+name = "k9s"
+check_path = "~/.config/k9s"
+apply = "apply.sh"
