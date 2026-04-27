@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+import argparse
+from pathlib import Path
+import sys
+
+DEFAULT_SHEBANG = '#!/usr/bin/env bash\nset -euo pipefail\n'
+
+
+def add_block(path: Path, start: str, end: str, body: str) -> str:
+    block = f'{start}\n{body}\n{end}'
+    if path.exists():
+        content = path.read_text(encoding='utf-8')
+    else:
+        content = DEFAULT_SHEBANG
+
+    if start in content and end in content:
+        before, rest = content.split(start, 1)
+        _, after = rest.split(end, 1)
+        content = before.rstrip() + '\n\n' + block + after
+    else:
+        if not content.endswith('\n'):
+            content += '\n'
+        if not content.startswith('#!/usr/bin/env bash\n'):
+            content = DEFAULT_SHEBANG + content
+        content = content.rstrip() + '\n\n' + block + '\n'
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding='utf-8')
+    return 'installed'
+
+
+def remove_block(path: Path, start: str, end: str) -> str:
+    if not path.exists():
+        return 'missing'
+
+    content = path.read_text(encoding='utf-8')
+    if start not in content or end not in content:
+        return 'absent'
+
+    before, rest = content.split(start, 1)
+    _, after = rest.split(end, 1)
+    new_content = (before.rstrip() + '\n' + after.lstrip('\n')).rstrip() + '\n'
+
+    if new_content.strip() in {
+        '#!/usr/bin/env bash\nset -euo pipefail'.strip(),
+        '#!/usr/bin/env bash'.strip(),
+        '',
+    }:
+        path.unlink()
+        return 'removed-file'
+
+    path.write_text(new_content, encoding='utf-8')
+    return 'updated'
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    add = subparsers.add_parser('add')
+    add.add_argument('path', type=Path)
+    add.add_argument('start')
+    add.add_argument('end')
+    add.add_argument('body')
+
+    remove = subparsers.add_parser('remove')
+    remove.add_argument('path', type=Path)
+    remove.add_argument('start')
+    remove.add_argument('end')
+
+    args = parser.parse_args()
+
+    if args.command == 'add':
+        print(add_block(args.path, args.start, args.end, args.body))
+        return 0
+
+    print(remove_block(args.path, args.start, args.end))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -53,25 +53,15 @@ def install_templates() -> None:
 
 def install_hook() -> None:
     HOOK_DIR.mkdir(parents=True, exist_ok=True)
-    block = f'{START_MARKER}\n"{ROOT_DIR / "bin/omarchy-theme-sync"}" "$@"\n{END_MARKER}'
-
-    if HOOK_PATH.exists():
-        content = HOOK_PATH.read_text(encoding='utf-8')
-    else:
-        content = '#!/usr/bin/env bash\nset -euo pipefail\n'
-
-    if START_MARKER in content and END_MARKER in content:
-        before, rest = content.split(START_MARKER, 1)
-        _, after = rest.split(END_MARKER, 1)
-        content = before.rstrip() + '\n\n' + block + after
-    else:
-        if not content.endswith('\n'):
-            content += '\n'
-        if not content.startswith('#!/usr/bin/env bash\n'):
-            content = '#!/usr/bin/env bash\nset -euo pipefail\n' + content
-        content = content.rstrip() + '\n\n' + block + '\n'
-
-    HOOK_PATH.write_text(content, encoding='utf-8')
+    hook_body = f'"{ROOT_DIR / "bin/omarchy-theme-sync"}" "$@"'
+    subprocess.run([
+        str(ROOT_DIR / 'bin/manage-hook-block'),
+        'add',
+        str(HOOK_PATH),
+        START_MARKER,
+        END_MARKER,
+        hook_body,
+    ], check=True)
     ensure_executable(HOOK_PATH)
     print(f'Installed hook: {HOOK_PATH}')
 
@@ -79,6 +69,7 @@ def install_hook() -> None:
 def ensure_scripts_executable() -> None:
     ensure_executable(ROOT_DIR / 'install.sh')
     ensure_executable(ROOT_DIR / 'bin/omarchy-theme-sync')
+    ensure_executable(ROOT_DIR / 'bin/manage-hook-block')
     for integration_dir in sorted(INTEGRATIONS_DIR.iterdir()):
         if not integration_dir.is_dir():
             continue
