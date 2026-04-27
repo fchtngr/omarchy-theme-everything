@@ -2,4 +2,4 @@
 set -euo pipefail
 
 INTEGRATION_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-"$INTEGRATION_DIR/omarchy-intellij-sync"
+python3 "$INTEGRATION_DIR/generate-theme.py"

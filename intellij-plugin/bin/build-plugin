@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+if [[ -x "$PLUGIN_DIR/gradlew" ]]; then
+  exec "$PLUGIN_DIR/gradlew" -p "$PLUGIN_DIR" buildPlugin
+fi
+
+if command -v mise >/dev/null 2>&1 && [[ -f "$PLUGIN_DIR/mise.toml" ]]; then
+  mise trust "$PLUGIN_DIR/mise.toml"
+  mise -C "$PLUGIN_DIR" install
+  JAVA_BIN=$(mise -C "$PLUGIN_DIR" which java)
+  GRADLE_BIN=$(mise -C "$PLUGIN_DIR" which gradle)
+  export JAVA_HOME
+  JAVA_HOME=$(dirname "$(dirname "$JAVA_BIN")")
+  exec "$GRADLE_BIN" -p "$PLUGIN_DIR" buildPlugin
+fi
+
+if command -v gradle >/dev/null 2>&1; then
+  exec gradle -p "$PLUGIN_DIR" buildPlugin
+fi
+
+echo "No Gradle wrapper, gradle executable, or mise-managed gradle found for $PLUGIN_DIR" >&2
+exit 1

@@ -1,54 +1,40 @@
-# IntelliJ / JetBrains integration
+# IntelliJ integration
+
+This is the in-repo IntelliJ / JetBrains integration.
 
 ![Osake Jade](screen1.png)
 ![Nord](screen2.png)
 
-Files in this integration:
-- `integration.toml`
-- `apply.sh`
-- `omarchy-intellij-sync`
+## Overview
 
-This integration has no `templates/` directory because it generates and installs its theme directly.
+This integration:
+- generates runtime theme data on every Omarchy hook run
+- notifies the installed plugin to refresh when present
 
-## Detection
+## Files
 
-The framework loads `integration.toml` and only runs this integration when its configured `check_path` exists.
+- `integration.toml` — activates this integration when JetBrains config is present
+- `apply.sh` — Omarchy hook entrypoint
+- `generate-theme.py` — writes normalized runtime theme data
+- `../../intellij-plugin/` — IntelliJ plugin source scaffold
+- `../../intellij-plugin/bin/install-plugin` — attempts to build/install the plugin
 
-## What it does
+## Runtime output
 
-`omarchy-intellij-sync`:
-- reads Omarchy `colors.toml`
-- generates a local JetBrains theme plugin
-- installs it into JetBrains data directories   
-- selects the generated theme and editor scheme
+Generated files live under:
+- `~/.config/omarchy-theme-everything/intellij/`
 
-Generated plugin id:
-- `omarchy.intellij.theme`
+Current files:
+- `theme.json`
+- `refresh.token`
 
-Generated plugin layout:
-- `~/.local/share/JetBrains/<IDE>/omarchy-intellij-theme/lib/omarchy-intellij-theme.jar`
+## Activation
 
-The jar contains:
-- `META-INF/plugin.xml`
-- `theme/omarchy.theme.json`
-- `theme/omarchy.xml`
+The integration is active when:
+- `~/.config/JetBrains` exists
 
-Updated settings files:
-- `~/.config/JetBrains/<IDE>/options/laf.xml`
-- `~/.config/JetBrains/<IDE>/options/colors.scheme.xml`
+The plugin itself is optional for now; theme data generation does not depend on plugin installation.
 
-## Manual run
+## Future
 
-```bash
-./integrations/intellij/omarchy-intellij-sync
-```
-
-Useful options:
-
-```bash
-./integrations/intellij/omarchy-intellij-sync --help
-```
-
-## Notes
-
-- Restart JetBrains IDEs after a sync for the most reliable theme reload.
+The in-repo plugin scaffold is intended to become a published IntelliJ plugin in the future.

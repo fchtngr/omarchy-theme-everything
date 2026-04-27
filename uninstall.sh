@@ -17,7 +17,9 @@ if [[ -f "$HOOK_PATH" ]] && grep -Fq "$START_MARKER" "$HOOK_PATH" && grep -Fq "$
 fi
 
 rm -f "$THEMED_DIR/k9s.yaml.tpl"
-rm -rf "$HOME/.local/share/JetBrains"/*/omarchy-intellij-theme
+rm -rf "$HOME/.config/omarchy-theme-everything/intellij"
+find "$HOME/.local/share/JetBrains" "$HOME/.local/share/Google" -mindepth 2 -maxdepth 2 -type f -name 'intellij-omarchy.zip' -delete 2>/dev/null || true
+find "$HOME/.local/share/JetBrains" "$HOME/.local/share/Google" \( -path '*/plugins/intellij-omarchy' -o -path '*/intellij-omarchy' \) -type d -exec rm -rf {} + 2>/dev/null || true
 
 echo "Removed installed templates and IntelliJ plugin files."
 echo "If IntelliJ is still set to Omarchy, switch theme/scheme manually in the IDE."

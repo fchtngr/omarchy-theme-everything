@@ -17,6 +17,7 @@ Current integrations:
 This:
 - registers an Omarchy `theme-set` hook
 - installs any integration templates into `~/.config/omarchy/themed/`
+- attempts to install the IntelliJ plugin
 - refreshes the current Omarchy theme
 
 ## Uninstall
@@ -33,8 +34,11 @@ Each integration lives in its own self-contained folder under `integrations/`.
 
 See:
 - `integrations/intellij/README.md`
+- `intellij-plugin/README.md`
 - `integrations/k9s/README.md`
 
 ## Notes
 
 - JetBrains may need a restart after sync
+- the IntelliJ plugin scaffold lives in `intellij-plugin/`; the integration can generate theme data even without the plugin installed
+- the in-repo IntelliJ plugin is intended to be published as a proper IntelliJ plugin in the future

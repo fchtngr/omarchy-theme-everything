@@ -56,6 +56,13 @@ def main() -> int:
             log(f'SKIP {metadata.get("name", integration_dir.name)}: check_path not found: {expanded_check_path}')
             continue
 
+        disabled_if_path_exists = metadata.get('disabled_if_path_exists')
+        if isinstance(disabled_if_path_exists, str) and disabled_if_path_exists:
+            disabled_path = expand_path(disabled_if_path_exists)
+            if disabled_path.exists():
+                log(f'SKIP {metadata.get("name", integration_dir.name)}: disabled by path: {disabled_path}')
+                continue
+
         apply_script = integration_dir / apply_rel
         if not apply_script.exists():
             log(f'ERROR: Apply script not found: {apply_script}')

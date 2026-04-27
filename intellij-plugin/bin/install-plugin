@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+DIST_DIR="$PLUGIN_DIR/build/distributions"
+PLUGIN_ZIP=""
+
+find_plugin_zip() {
+  find "$DIST_DIR" -maxdepth 1 -type f -name '*.zip' | sort | tail -n 1
+}
+
+build_plugin_if_possible() {
+  if [[ -x "$PLUGIN_DIR/gradlew" ]]; then
+    (cd "$PLUGIN_DIR" && ./gradlew buildPlugin)
+    return
+  fi
+  if command -v mise >/dev/null 2>&1 && [[ -f "$PLUGIN_DIR/mise.toml" ]]; then
+    local java_bin gradle_bin
+    mise trust "$PLUGIN_DIR/mise.toml"
+    mise -C "$PLUGIN_DIR" install
+    java_bin=$(mise -C "$PLUGIN_DIR" which java)
+    gradle_bin=$(mise -C "$PLUGIN_DIR" which gradle)
+    export JAVA_HOME
+    JAVA_HOME=$(dirname "$(dirname "$java_bin")")
+    "$gradle_bin" -p "$PLUGIN_DIR" buildPlugin
+    return
+  fi
+  if command -v gradle >/dev/null 2>&1; then
+    (cd "$PLUGIN_DIR" && gradle buildPlugin)
+    return
+  fi
+  echo "WARN: No Gradle wrapper, gradle executable, or mise-managed gradle found; skipping IntelliJ plugin build."
+}
+
+install_zip_everywhere() {
+  local zip_path=$1
+  local installed=0
+  local config_root data_root config_dir_name data_dir extracted_root
+
+  for config_root in "$HOME/.config/JetBrains" "$HOME/.config/Google"; do
+    [[ -d "$config_root" ]] || continue
+
+    if [[ "$config_root" == "$HOME/.config/JetBrains" ]]; then
+      data_root="$HOME/.local/share/JetBrains"
+    else
+      data_root="$HOME/.local/share/Google"
+    fi
+    [[ -d "$data_root" ]] || continue
+
+    while IFS= read -r -d '' config_dir; do
+      config_dir_name=$(basename "$config_dir")
+      if [[ "$config_root" == "$HOME/.config/Google" && "$config_dir_name" != AndroidStudio* ]]; then
+        continue
+      fi
+      data_dir="$data_root/$config_dir_name"
+      [[ -d "$data_dir" ]] || continue
+
+      rm -rf "$data_dir/intellij-omarchy" "$data_dir/plugins/intellij-omarchy"
+      python3 - "$zip_path" "$data_dir" <<'PY'
+import sys
+import zipfile
+from pathlib import Path
+
+zip_path = Path(sys.argv[1])
+data_dir = Path(sys.argv[2])
+with zipfile.ZipFile(zip_path) as zf:
+    zf.extractall(data_dir)
+PY
+      extracted_root="$data_dir/intellij-omarchy"
+      echo "Installed IntelliJ plugin: $extracted_root"
+      installed=1
+    done < <(find "$config_root" -mindepth 1 -maxdepth 1 -type d -print0)
+  done
+
+  if [[ $installed -eq 0 ]]; then
+    echo "WARN: No JetBrains IDE data directories found for plugin installation."
+    return 1
+  fi
+}
+
+build_plugin_if_possible || true
+
+if [[ -d "$DIST_DIR" ]]; then
+  PLUGIN_ZIP=$(find_plugin_zip || true)
+fi
+
+if [[ -z "$PLUGIN_ZIP" ]]; then
+  echo "WARN: No built IntelliJ plugin zip found under $DIST_DIR"
+  exit 0
+fi
+
+if install_zip_everywhere "$PLUGIN_ZIP"; then
+  echo "Installed IntelliJ plugin from: $PLUGIN_ZIP"
+fi

@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-import argparse
 import colorsys
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 import sys
-import xml.etree.ElementTree as ET
-import zipfile
 
 try:
     import tomllib
 except ModuleNotFoundError:
     print('Python 3.11+ is required (missing tomllib)', file=sys.stderr)
-    sys.exit(1)
+    raise SystemExit(1)
 
 DEFAULT_THEME_DIR = Path.home() / '.config/omarchy/current/theme'
 DEFAULT_NAME = 'Omarchy'
-PLUGIN_ID = 'omarchy.intellij.theme'
-PLUGIN_DIR_NAME = 'omarchy-intellij-theme'
-PLUGIN_JAR_NAME = 'omarchy-intellij-theme.jar'
-THEME_FILE_NAME = 'omarchy.theme.json'
-SCHEME_FILE_NAME = 'omarchy.xml'
-LEGACY_SCHEME_FILE_NAME = 'omarchy.icls'
-LEGACY_THEME_FILE_NAME = 'omarchy.theme.json'
+OUTPUT_DIR = Path.home() / '.config/omarchy-theme-everything/intellij'
+MANIFEST_PATH = OUTPUT_DIR / 'manifest.json'
+THEME_JSON_PATH = OUTPUT_DIR / 'theme.json'
+SCHEME_XML_PATH = OUTPUT_DIR / 'omarchy.xml'
+REFRESH_TOKEN_PATH = OUTPUT_DIR / 'refresh.token'
+REQUIRED = [
+    'background',
+    'foreground',
+    'accent',
+    'cursor',
+    'selection_background',
+    'selection_foreground',
+]
 
 
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -73,24 +77,6 @@ def is_dark(color: str) -> bool:
     return luminance(color) < 0.4
 
 
-def discover_ide_pairs() -> list[tuple[Path, Path]]:
-    pairs: list[tuple[Path, Path]] = []
-    roots = [
-        (Path.home() / '.config/JetBrains', Path.home() / '.local/share/JetBrains', lambda n: True),
-        (Path.home() / '.config/Google', Path.home() / '.local/share/Google', lambda n: n.startswith('AndroidStudio')),
-    ]
-    for config_root, data_root, matcher in roots:
-        if not config_root.exists() or not data_root.exists():
-            continue
-        for config_dir in sorted(config_root.iterdir()):
-            if not config_dir.is_dir() or not matcher(config_dir.name):
-                continue
-            data_dir = data_root / config_dir.name
-            if data_dir.is_dir():
-                pairs.append((config_dir, data_dir))
-    return pairs
-
-
 def sanitize_name(value: str) -> str:
     return re.sub(r'\s+', ' ', value).strip() or DEFAULT_NAME
 
@@ -99,8 +85,7 @@ def load_palette(colors_file: Path) -> dict[str, str]:
     with colors_file.open('rb') as f:
         data = tomllib.load(f)
     palette = {k: v for k, v in data.items() if isinstance(v, str) and v.startswith('#')}
-    required = ['background', 'foreground', 'accent', 'cursor', 'selection_background', 'selection_foreground']
-    missing = [key for key in required if key not in palette]
+    missing = [key for key in REQUIRED if key not in palette]
     if missing:
         raise SystemExit(f'Missing required colors in {colors_file}: {", ".join(missing)}')
     return palette
@@ -155,7 +140,6 @@ def build_theme_json(name: str, palette: dict[str, str]) -> dict:
         'dark': dark,
         'author': 'Generated from Omarchy colors',
         'parentTheme': 'ExperimentalDark' if dark else 'ExperimentalLight',
-        'editorScheme': f'/theme/{SCHEME_FILE_NAME}',
         'colors': colors,
         'ui': {
             'Islands': 1,
@@ -506,183 +490,40 @@ def build_editor_scheme_xml(name: str, palette: dict[str, str]) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def build_plugin_xml(name: str) -> str:
-    return f'''<idea-plugin>
-  <id>{PLUGIN_ID}</id>
-  <name>{name}</name>
-  <vendor email="" url="https://omarchy.org">Omarchy</vendor>
-  <category>UI</category>
-  <version>1.0.0</version>
-  <depends>com.intellij.modules.platform</depends>
-  <extensions defaultExtensionNs="com.intellij">
-    <themeProvider id="{PLUGIN_ID}" path="/theme/{THEME_FILE_NAME}" />
-  </extensions>
-</idea-plugin>
-'''
-
-
-def plugin_layout(output_dir: Path) -> tuple[Path, Path]:
-    plugin_root = output_dir / PLUGIN_DIR_NAME
-    jar_path = plugin_root / 'lib' / PLUGIN_JAR_NAME
-    return plugin_root, jar_path
-
-
-def write_plugin(output_dir: Path, name: str, theme_json: dict, editor_xml: str) -> tuple[Path, Path]:
-    plugin_root, jar_path = plugin_layout(output_dir)
-    jar_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(jar_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr('META-INF/plugin.xml', build_plugin_xml(name))
-        zf.writestr(f'theme/{THEME_FILE_NAME}', json.dumps(theme_json, indent=2) + '\n')
-        zf.writestr(f'theme/{SCHEME_FILE_NAME}', editor_xml)
-    return plugin_root, jar_path
-
-
-def remove_legacy_files(config_dir: Path) -> None:
-    for path in [
-        config_dir / 'themes' / LEGACY_THEME_FILE_NAME,
-        config_dir / 'themes' / f'{DEFAULT_NAME}.theme.json',
-        config_dir / 'colors' / LEGACY_SCHEME_FILE_NAME,
-        config_dir / 'colors' / f'{DEFAULT_NAME}.icls',
-        config_dir / 'colors' / 'Omarchy Sync.icls',
-        config_dir / 'themes' / 'Omarchy Sync.theme.json',
-    ]:
-        if path.exists():
-            path.unlink()
-
-
-def ensure_options_component_file(path: Path, component_name: str) -> ET.ElementTree:
-    if path.exists():
-        try:
-            tree = ET.parse(path)
-            root = tree.getroot()
-            if root.tag == 'application':
-                return tree
-        except ET.ParseError:
-            pass
-    root = ET.Element('application')
-    ET.SubElement(root, 'component', {'name': component_name})
-    return ET.ElementTree(root)
-
-
-def get_or_create_component(root: ET.Element, name: str) -> ET.Element:
-    for component in root.findall('component'):
-        if component.get('name') == name:
-            return component
-    return ET.SubElement(root, 'component', {'name': name})
-
-
-def indent_xml(elem: ET.Element, level: int = 0) -> None:
-    i = '\n' + level * '  '
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + '  '
-        for child in elem:
-            indent_xml(child, level + 1)
-        if not elem[-1].tail or not elem[-1].tail.strip():
-            elem[-1].tail = i
-    if level and (not elem.tail or not elem.tail.strip()):
-        elem.tail = i
-
-
-def write_xml(tree: ET.ElementTree, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    indent_xml(tree.getroot())
-    tree.write(path, encoding='UTF-8', xml_declaration=False)
-
-
-def select_theme_and_scheme(config_dir: Path, theme_name: str) -> None:
-    options_dir = config_dir / 'options'
-    options_dir.mkdir(parents=True, exist_ok=True)
-
-    laf_path = options_dir / 'laf.xml'
-    laf_tree = ensure_options_component_file(laf_path, 'LafManager')
-    laf_root = laf_tree.getroot()
-    laf_component = get_or_create_component(laf_root, 'LafManager')
-    laf = laf_component.find('laf')
-    if laf is None:
-        laf = ET.SubElement(laf_component, 'laf')
-    laf.attrib.clear()
-    laf.set('themeId', PLUGIN_ID)
-    write_xml(laf_tree, laf_path)
-
-    scheme_path = options_dir / 'colors.scheme.xml'
-    scheme_tree = ensure_options_component_file(scheme_path, 'EditorColorsManagerImpl')
-    scheme_root = scheme_tree.getroot()
-    scheme_component = get_or_create_component(scheme_root, 'EditorColorsManagerImpl')
-    global_scheme = scheme_component.find('global_color_scheme')
-    if global_scheme is None:
-        global_scheme = ET.SubElement(scheme_component, 'global_color_scheme')
-    global_scheme.attrib.clear()
-    global_scheme.set('name', theme_name)
-    write_xml(scheme_tree, scheme_path)
+def build_manifest(name: str, dark: bool) -> dict:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    return {
+        'schemaVersion': 2,
+        'name': name,
+        'generatedAt': generated_at,
+        'dark': dark,
+        'themeFile': THEME_JSON_PATH.name,
+        'schemeFile': SCHEME_XML_PATH.name,
+    }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Generate and install an IntelliJ theme plugin from Omarchy colors')
-    parser.add_argument('--theme-dir', type=Path, default=DEFAULT_THEME_DIR, help='Omarchy theme directory containing colors.toml')
-    parser.add_argument('--colors-file', type=Path, help='Path to colors.toml')
-    parser.add_argument('--jb-config-dir', action='append', type=Path, dest='jb_config_dirs', help='JetBrains config dir to update settings in (repeatable)')
-    parser.add_argument('--jb-data-dir', action='append', type=Path, dest='jb_data_dirs', help='JetBrains data dir to install plugin into (repeatable)')
-    parser.add_argument('--output-dir', type=Path, help='Generate plugin files into a directory without installing')
-    parser.add_argument('--name', default=DEFAULT_NAME, help='Visible IntelliJ theme/scheme name')
-    parser.add_argument('--no-select', action='store_true', help='Install plugin but do not switch IntelliJ to it')
-    args = parser.parse_args()
-
-    colors_file = args.colors_file or (args.theme_dir / 'colors.toml')
+    colors_file = DEFAULT_THEME_DIR / 'colors.toml'
     if not colors_file.exists():
-        print(f'colors.toml not found: {colors_file}', file=sys.stderr)
-        return 1
+        raise SystemExit(f'Colors file not found: {colors_file}')
 
-    name = sanitize_name(args.name)
     palette = load_palette(colors_file)
+    name = f'Omarchy {sanitize_name(DEFAULT_THEME_DIR.name.replace('-', ' ').replace('_', ' ').title())}'
+    dark = is_dark(palette['background'])
     theme_json = build_theme_json(name, palette)
     editor_xml = build_editor_scheme_xml(name, palette)
+    manifest = build_manifest(name, dark)
 
-    if args.output_dir:
-        plugin_root, jar_path = write_plugin(args.output_dir, name, theme_json, editor_xml)
-        print(f'Wrote plugin dir {plugin_root}')
-        print(f'Wrote plugin jar {jar_path}')
-        return 0
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+    THEME_JSON_PATH.write_text(json.dumps(theme_json, indent=2) + '\n', encoding='utf-8')
+    SCHEME_XML_PATH.write_text(editor_xml, encoding='utf-8')
+    REFRESH_TOKEN_PATH.write_text(manifest['generatedAt'] + '\n', encoding='utf-8')
 
-    if args.jb_config_dirs or args.jb_data_dirs:
-        config_dirs = args.jb_config_dirs or []
-        data_dirs = args.jb_data_dirs or []
-        if config_dirs and data_dirs and len(config_dirs) != len(data_dirs):
-            print('--jb-config-dir and --jb-data-dir must be provided the same number of times when both are used.', file=sys.stderr)
-            return 1
-        if config_dirs and not data_dirs:
-            pairs = []
-            for config_dir in config_dirs:
-                if config_dir.parent.name == 'JetBrains' and config_dir.parent.parent == Path.home() / '.config':
-                    data_dir = Path.home() / '.local/share/JetBrains' / config_dir.name
-                elif config_dir.parent.name == 'Google' and config_dir.parent.parent == Path.home() / '.config':
-                    data_dir = Path.home() / '.local/share/Google' / config_dir.name
-                else:
-                    print(f'Cannot infer data dir from config dir: {config_dir}. Also pass --jb-data-dir.', file=sys.stderr)
-                    return 1
-                pairs.append((config_dir, data_dir))
-        elif data_dirs and not config_dirs:
-            pairs = [(Path(), data_dir) for data_dir in data_dirs]
-        else:
-            pairs = list(zip(config_dirs, data_dirs))
-    else:
-        pairs = discover_ide_pairs()
-
-    if not pairs:
-        print('No JetBrains installations found. Use --output-dir or explicit --jb-config-dir/--jb-data-dir.', file=sys.stderr)
-        return 1
-
-    for config_dir, data_dir in pairs:
-        plugin_root, jar_path = write_plugin(data_dir, name, theme_json, editor_xml)
-        print(f'Installed plugin dir {plugin_root}')
-        print(f'Installed plugin jar {jar_path}')
-        if config_dir and config_dir.exists():
-            remove_legacy_files(config_dir)
-            if not args.no_select:
-                select_theme_and_scheme(config_dir, name)
-                print(f'Selected theme in {config_dir / "options/laf.xml"}')
-                print(f'Selected scheme in {config_dir / "options/colors.scheme.xml"}')
-
+    print(f'Wrote {MANIFEST_PATH}')
+    print(f'Wrote {THEME_JSON_PATH}')
+    print(f'Wrote {SCHEME_XML_PATH}')
+    print(f'Updated {REFRESH_TOKEN_PATH}')
     return 0
 
 
